@@ -2070,7 +2070,7 @@ def _vector_value_sites_and_assignments_for_async_ops(
     if isinstance(idx.type, ir.VectorType):
       value_site = ValueSite(op, VariableType.OPERAND, base_operand_index + i)
       value_site_var = cs.Variable(value_site)
-      layout = cs.RegisterLayout(value=fa.TMA_GATHER_INDICES_LAYOUT)
+      layout = cs.RegisterLayout(value=fa.TMA_INDICES_LAYOUT)
       values_sites[value_site_var] = [value_site]
       assignments[value_site_var] = layout
   return values_sites, assignments
@@ -2082,9 +2082,10 @@ def _async_load_store_constraint_system(
     ctx: DerivationContext,
     op: mgpu.AsyncLoadOp | mgpu.AsyncStoreOp,
 ) -> ConstraintSystemDerivationRuleResult:
-  # We only support 2D gathers along the leading dimension. Tiling either keeps
-  # the gather dimension leading or allows collapsing leading dimensions to
-  # maintain contiguity without transforming global memory.
+  # We only support 2D gathers/scatters along the leading dimension. Tiling
+  # either keeps the gather/scatter dimension leading or allows
+  # collapsing leading dimensions to maintain contiguity without
+  # transforming global memory.
   tiling_multiple = []
   for i, (size, index) in enumerate(zip(op.slice_lengths, op.indices, strict=True)):
     if size == -1:
@@ -2093,11 +2094,12 @@ def _async_load_store_constraint_system(
     if isinstance(index.type, ir.VectorType):
       if i != 0:
         raise NotImplementedError("Only leading gather dimensions allowed.")
-      shape = ir.MemRefType(op.source.type).shape
-      if len(shape) != 2:
-        raise NotImplementedError("Only 2D gathers for async load are supported.")
       if isinstance(op, mgpu.AsyncStoreOp):
-        raise NotImplementedError
+        shape = ir.MemRefType(op.destination.type).shape
+      else:
+        shape = ir.MemRefType(op.source.type).shape
+      if len(shape) != 2:
+        raise NotImplementedError("Only 2D gathers/scatters for async load/store are supported.")
       tiling_multiple.append(size)
       continue
     tiling_multiple.append(dynamic_gcd(size, index))

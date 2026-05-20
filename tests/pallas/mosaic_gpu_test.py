@@ -389,6 +389,40 @@ class PallasCallTest(PallasTest, jtu.CudaArchSpecificTest):
     x = jnp.arange(256).astype(jnp.float32)
     np.testing.assert_array_equal(f(x), x + 10)
 
+  @parameterized.parameters(
+      ((),),
+      ((plgpu.TilingTransform((8, 32)), plgpu.SwizzleTransform(128)),),
+  )
+  def test_copy_smem_to_gmem_scatter(self, transforms):
+    if not jtu.is_cuda_compute_capability_at_least("10.0"):
+      self.skipTest("Only works on a GPU with capability >= sm100")
+    # Make sure we can infer the layout in WG
+    indices_layout = (
+        None
+        if self.LOWERING_SEMANTICS == plgpu.LoweringSemantics.Warpgroup
+        else plgpu.Layout.TMA_INDICES
+    )
+    dtype = jnp.int32
+    shape = (64, 128)
+    @functools.partial(
+        self.kernel,
+        out_shape=jax.ShapeDtypeStruct(shape, dtype),
+        scratch_shapes=[plgpu.SMEM(shape, dtype, transforms=transforms), plgpu.Barrier(num_arrivals=1)],
+    )
+    def kernel(tokens_ref, perm_ref, o_ref, smem_ref, barrier_ref):
+      tokens = plgpu.load(tokens_ref, (), optimized=False)
+      smem_ref[...] = tokens
+      plgpu.commit_smem()
+      idxs = plgpu.load(perm_ref, (), layout=indices_layout, optimized=False)
+      plgpu.copy_smem_to_gmem(smem_ref, o_ref.at[idxs, :])
+      plgpu.wait_smem_to_gmem(0)
+
+    key = jax.random.key(0)
+    tokens = jax.random.randint(key, shape, 0, 100, dtype=dtype)
+    perm = jax.random.permutation(key, shape[0]).astype(jnp.uint32)
+    expected = jnp.zeros_like(tokens).at[perm].set(tokens)
+    np.testing.assert_array_equal(kernel(tokens, perm), expected)
+
   @parameterized.product(
       op=[
           lax.neg,
@@ -1511,7 +1545,7 @@ class PallasCallTest(PallasTest, jtu.CudaArchSpecificTest):
         scratch_shapes=[plgpu.Barrier()],
     )
     def kernel(x_ref_gmem, idx_ref, o_ref, barrier_ref):
-      idxs = plgpu.load(idx_ref, (), layout=plgpu.Layout.TMA_GATHER_INDICES)
+      idxs = plgpu.load(idx_ref, (), layout=plgpu.Layout.TMA_INDICES)
       plgpu.copy_gmem_to_smem(x_ref_gmem.at[idxs, 64:], o_ref, barrier_ref)
       plgpu.barrier_wait(barrier_ref)
 

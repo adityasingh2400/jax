@@ -2087,7 +2087,7 @@ class LayoutInferenceTest(parameterized.TestCase):
       )
 
     with self.assertRaisesRegex(
-        NotImplementedError, "Only 2D gathers for async load are supported"
+        NotImplementedError, "Only 2D gathers/scatters for async load/store are supported"
     ):
       mgpu.infer_layout(self.module)
 
@@ -2126,7 +2126,8 @@ class LayoutInferenceTest(parameterized.TestCase):
     ):
       mgpu.infer_layout(self.module)
 
-  def test_infer_transforms_for_async_store_gather_indices_raises_not_implemented(self):
+  @parameterized.parameters(mgpu.dialect.AsyncLoadOp, mgpu.dialect.AsyncStoreOp)
+  def test_infer_transforms_for_async_gather_scatter_indices_ok(self, op_type):
     shape = (64, 64)
     elt_ty = ir.BF16Type.get()
 
@@ -2134,9 +2135,11 @@ class LayoutInferenceTest(parameterized.TestCase):
       gmem_ty = ir.MemRefType.get(shape, elt_ty)
       smem_ty = ir.MemRefType.get(shape, elt_ty, memory_space=mgpu.utils.smem())
       gather_indices_ty = ir.VectorType.get((shape[0],), elt_ty)
-      gmem_ref, smem_ref, gather_indices = undefs(
-          gmem_ty, smem_ty, gather_indices_ty
-      )
+      barrier_ty = mgpu.dialect.BarrierType.get()
+      if op_type == mgpu.dialect.AsyncLoadOp:
+        gmem_ref, smem_ref, barrier, gather_indices = undefs(gmem_ty, smem_ty, barrier_ty, gather_indices_ty)
+      else:
+        gmem_ref, smem_ref, gather_indices = undefs(gmem_ty, smem_ty, gather_indices_ty)
 
       transforms = ir.ArrayAttr.get([
           mgpu.dialect.TileTransformAttr.get((8, 32)),
@@ -2144,15 +2147,20 @@ class LayoutInferenceTest(parameterized.TestCase):
       ])
       zero = arith.constant(ir.IntegerType.get_signless(32), 0)
       smem_ref = mgpu.dialect.with_transforms(smem_ref, transforms)
-      mgpu.dialect.AsyncStoreOp(
-        source=smem_ref,
-        destination=gmem_ref,
-        indices=[gather_indices, zero],
-        slice_lengths=shape,
-      )
+      if op_type == mgpu.dialect.AsyncLoadOp:
+        op = mgpu.dialect.AsyncLoadOp(
+            source=gmem_ref, destination=smem_ref, barrier=barrier,
+            indices=[gather_indices, zero], slice_lengths=shape,
+            collective=ir.ArrayAttr.get([])
+        )
+      else:
+        op = mgpu.dialect.AsyncStoreOp(
+            source=smem_ref, destination=gmem_ref,
+            indices=[gather_indices, zero], slice_lengths=shape,
+        )
 
-    with self.assertRaises(NotImplementedError):
-      mgpu.infer_layout(self.module)
+    mgpu.infer_layout(self.module)
+    self.assertSequenceEqual(inference_utils.in_transforms(op), [transforms])
 
   def test_infer_transforms_for_try_cluster_cancel_op(self):
 
@@ -3217,7 +3225,7 @@ class LayoutInferenceTest(parameterized.TestCase):
             collective=ir.ArrayAttr.get([]),
         )
 
-      layout = mgpu.TMA_GATHER_INDICES_LAYOUT
+      layout = mgpu.TMA_INDICES_LAYOUT
       mgpu.infer_layout(self.module)
       self.checkInLayouts(op, [layout])
 
