@@ -403,12 +403,13 @@ class PallasCallTest(PallasTest, jtu.CudaArchSpecificTest):
           jax.nn.gelu,
           lax.abs,
           lax.round,
+          lax.clz,
           lambda x: lax.round(x, lax.RoundingMethod.TO_NEAREST_EVEN),
       ],
       approx_math=[True, False],
   )
   def test_unary_op(self, op, approx_math):
-    dtype = jnp.int32 if op is lax.bitwise_not else jnp.float32
+    dtype = jnp.int32 if op in (lax.bitwise_not, lax.clz) else jnp.float32
 
     @functools.partial(
         self.pallas_call,
